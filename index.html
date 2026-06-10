@@ -433,7 +433,11 @@ footer{background:var(--ink);padding:1.5rem 5%;display:flex;justify-content:spac
           <span class="ct-ico">✉️</span>
           <div><span class="ct-vi">phuongvv276@gmail.com</span><span class="ct-en">Kênh liên hệ chính · Primary contact</span></div>
         </a>
-        <a class="ct-row rv d1" href="#" onclick="alert('LinkedIn sắp cập nhật!');return false">
+        <a class="ct-row rv d1" href="tel:+84916895586">
+          <span class="ct-ico">📱</span>
+          <div><span class="ct-vi">+84 916 89 5586</span><span class="ct-en">Phone · Zalo · WhatsApp</span></div>
+        </a>
+        <a class="ct-row rv d2" href="#" onclick="alert('LinkedIn sắp cập nhật!');return false">
           <span class="ct-ico">🔗</span>
           <div><span class="ct-vi">LinkedIn Profile</span><span class="ct-en">Sắp cập nhật · Coming soon</span></div>
         </a>
@@ -513,8 +517,68 @@ document.querySelectorAll('a,button').forEach(el=>{
     col[i*3]=c.r;col[i*3+1]=c.g;col[i*3+2]=c.b;
   }
   geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
-  geo.setAttribute('color',new THREE.BufferAttribute(col,3));
-  const sphere=new THREE.Points(geo,new THREE.PointsMaterial({size:.022,vertexColors:true,transparent:true,opacity:.9,sizeAttenuation:true,depthWrite:false}));
+  geo.setAttribute('aCol',new THREE.BufferAttribute(col,3));
+
+  /* ── CUSTOM GLSL SHADER ──
+     Vertex shader: làm hạt "thở" bằng noise + tản ra khi chuột lại gần
+     Fragment shader: vẽ hạt tròn mềm + ánh shimmer vàng/tím chạy trên bề mặt */
+  const sphereMat=new THREE.ShaderMaterial({
+    transparent:true,depthWrite:false,
+    uniforms:{
+      uTime:{value:0},                          // thời gian — điều khiển mọi animation
+      uMouse:{value:new THREE.Vector3(99,99,0)},// vị trí chuột trong không gian 3D (99 = ở xa, không ảnh hưởng)
+      uSize:{value:.022}                        // kích thước hạt gốc
+    },
+    vertexShader:`
+      attribute vec3 aCol;          // màu riêng của từng hạt (vàng/tím/kem/đen)
+      uniform float uTime;
+      uniform vec3 uMouse;
+      uniform float uSize;
+      varying vec3 vColor;
+      varying float vShimmer;
+
+      // Noise giả lập bằng sin — nhẹ hơn simplex noise rất nhiều, đủ đẹp cho hiệu ứng thở
+      float noise3(vec3 p){
+        return sin(p.x*1.7+uTime*.45)*sin(p.y*2.1+uTime*.35)*sin(p.z*1.9+uTime*.4);
+      }
+
+      void main(){
+        vColor=aCol;
+        // 1) HIỆU ỨNG THỞ: hạt phồng/xẹp nhẹ theo noise (±6% bán kính)
+        float n=noise3(position);
+        vec3 displaced=position*(1.0+n*.06);
+
+        // 2) SHIMMER: dải sáng chạy chéo qua quả cầu theo thời gian
+        vShimmer=smoothstep(.55,1.0,sin(uTime*.6+position.y*2.2+position.x*1.4)*.5+.5);
+
+        // Đưa hạt ra không gian thế giới (đã tính cả góc xoay của quả cầu)
+        vec4 worldPos=modelMatrix*vec4(displaced,1.0);
+
+        // 3) TẢN THEO CHUỘT: hạt trong bán kính 0.9 bị đẩy ra xa chuột
+        vec3 away=worldPos.xyz-uMouse;
+        float d=length(away);
+        float force=smoothstep(.9,0.0,d)*.4;   // càng gần chuột đẩy càng mạnh
+        worldPos.xyz+=normalize(away+1e-4)*force;
+
+        vec4 mv=viewMatrix*worldPos;
+        gl_Position=projectionMatrix*mv;
+        // Hạt gần camera to hơn, hạt đang "phồng" sáng hơn thì to hơn chút
+        gl_PointSize=uSize*(1.0+n*.4)*(300.0/-mv.z);
+      }`,
+    fragmentShader:`
+      varying vec3 vColor;
+      varying float vShimmer;
+      void main(){
+        // Vẽ hạt thành chấm tròn mềm thay vì ô vuông
+        float r=length(gl_PointCoord-vec2(.5));
+        if(r>.5)discard;
+        float soft=smoothstep(.5,.25,r);
+        // Trộn màu gốc với ánh tím nhạt khi shimmer chạy qua
+        vec3 glow=mix(vColor,vec3(.75,.62,.95),vShimmer*.45);
+        gl_FragColor=vec4(glow,.9*soft);
+      }`
+  });
+  const sphere=new THREE.Points(geo,sphereMat);
   sphere.position.set(2,0,0);
   scene.add(sphere);
 
@@ -534,11 +598,24 @@ document.querySelectorAll('a,button').forEach(el=>{
   let tmx=0,tmy=0,cmx=0,cmy=0;
   document.addEventListener('mousemove',e=>{tmx=(e.clientX/innerWidth-.5)*2;tmy=-(e.clientY/innerHeight-.5)*2;});
 
+  // Chuyển vị trí chuột 2D trên màn hình thành điểm 3D trên mặt phẳng z=0 (nơi quả cầu đứng)
+  const mouseWorld=new THREE.Vector3(99,99,0),tmpV=new THREE.Vector3();
+  function updateMouseWorld(){
+    tmpV.set(cmx,cmy,.5).unproject(camera);          // bắn tia từ camera qua con trỏ
+    tmpV.sub(camera.position).normalize();
+    const dist=(0-camera.position.z)/tmpV.z;          // tìm giao điểm với mặt phẳng z=0
+    mouseWorld.copy(camera.position).addScaledVector(tmpV,dist);
+    // Làm mượt: uniform tiến dần về vị trí mới thay vì nhảy giật
+    sphereMat.uniforms.uMouse.value.lerp(mouseWorld,.12);
+  }
+
   const clock=new THREE.Clock();
   (function animate(){
     requestAnimationFrame(animate);
     const t=clock.getElapsedTime();
+    sphereMat.uniforms.uTime.value=t;                 // cấp thời gian cho shader
     cmx+=(tmx-cmx)*.04;cmy+=(tmy-cmy)*.04;
+    updateMouseWorld();
     sphere.rotation.y=t*.1+cmx*.35;
     sphere.rotation.x=Math.sin(t*.07)*.1+cmy*.22;
     if(sphere.userData.rings){
